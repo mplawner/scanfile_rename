@@ -134,7 +134,8 @@ main() {
     processed=$((processed + 1))
   done
 
-  local msg="Done. Processed ${processed} PDF(s); skipped ${skipped}; failures ${failed}.\n\nLog: ${LOG}"
+  local nl=$'\n'
+  local msg="Done. Processed ${processed} PDF(s); skipped ${skipped}; failures ${failed}.${nl}${nl}Log: ${LOG}"
   _show_dialog "scanfile_rename (Quick Action)" "${msg}"
 }
 
