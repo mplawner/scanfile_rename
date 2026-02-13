@@ -1,7 +1,0 @@
-# Learnings
-
-- 2026-02-12: Added `pypdf` dependency so the tool can write classic PDF DocumentInfo metadata (Info dictionary) rather than XMP.
-- 2026-02-13: Added CLI parse-time validation helper `_positive_int()` and new `--keywords-count` flag (default 5) with subprocess-based unit tests using `--version` to avoid invoking Poppler/LM Studio.
-- 2026-02-13: Extended LLM prompt schema with `author`, `subject`, and `keywords` (bounded by `--keywords-count`) and added tolerant post-processing for `subject`/`keywords` in `extract_information()`.
-- 2026-02-13: Added pure metadata formatting helpers (`pretty_title_from_filename`, `pdf_creation_date_from_ymd`, `format_keywords`) with unit tests.
-- 2026-02-13: Tweaked `pretty_title_from_filename` to preserve unpadded date tokens like `YYYY-M-D`.

@@ -12,6 +12,7 @@ __pycache__/
 output.log
 processed/
 tmp/
+_versions/
 
 # Tooling state (not part of repo)
 .sisyphus/
