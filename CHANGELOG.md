@@ -7,6 +7,12 @@ and this project adheres to Semantic Versioning (https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+### Added
+- MIT License file.
+- GitHub Actions CI workflow.
+- CONTRIBUTING.md.
+- README badges (license + CI).
+
 ## [0.1.0] - 2026-02-13
 ### Added
 - Text-first extraction using Poppler `pdftotext`.

@@ -1,4 +1,5 @@
 # scanfile_rename
+[![License: MIT](https://img.shields.io/github/license/mplawner/scanfile_rename)](LICENSE) [![CI](https://github.com/mplawner/scanfile_rename/actions/workflows/ci.yml/badge.svg)](https://github.com/mplawner/scanfile_rename/actions/workflows/ci.yml)
 
 Rename scanned PDFs into human-readable filenames by extracting key fields (date, provider, document type, title). Text extraction runs first; if the PDF has little or no text, the tool can fall back to a vision pass via an OpenAI-compatible LLM endpoint (LM Studio and Ollama examples below).
 
