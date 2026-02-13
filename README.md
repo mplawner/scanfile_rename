@@ -57,6 +57,10 @@ python3 scanfile_rename.py "scan.pdf" --move
 python3 scanfile_rename.py "scan.pdf" --print-json
 ```
 
+### Finder Quick Action (macOS)
+
+For a right-click workflow in Finder, see the Quick Action setup docs: [quick_action/README.md](quick_action/README.md)
+
 ## Options
 
 All flags below match `scanfile_rename.py`'s `argparse` setup:

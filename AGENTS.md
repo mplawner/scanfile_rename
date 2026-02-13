@@ -84,6 +84,9 @@ python3 scanfile_rename.py --version
 ## Agent Workflow Expectations
 
 - Prefer minimal, targeted diffs.
+- Make atomic commits: one logical change per commit.
+- For user-visible changes, update `CHANGELOG.md` in the same change/commit.
+- Keep commits and `CHANGELOG.md` entries aligned going forward.
 - Whenever you change a file, also save a local snapshot under `_versions/` named `{filename}-YYYYMMDD-###` with the numeric suffix incremented for that day.
 - `_versions/` is gitignored and should remain uncommitted; it is for local backups only.
 - Keep stdout stable; if adding output, consider `--no-progress` / `--print-json` interactions.
