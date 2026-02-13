@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Virtualenv
+.venv/
+
+# macOS
+.DS_Store
+
+# Local artifacts
+output.log
+processed/
+tmp/
+
+# Tooling state (not part of repo)
+.sisyphus/
+
+# Editor/OS noise
+.idea/
+.vscode/
+
+# Env files (avoid committing secrets)
+.env
+.env.*

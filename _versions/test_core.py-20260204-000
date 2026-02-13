@@ -1,0 +1,34 @@
+import unittest
+
+import scanfile_rename as s
+
+
+class TestJsonParsing(unittest.TestCase):
+    def test_extract_json_loose_full(self):
+        self.assertEqual(s._extract_json_loose('{"a": 1}'), {"a": 1})
+
+    def test_extract_json_loose_embedded(self):
+        self.assertEqual(s._extract_json_loose('noise {"a": 1} tail'), {"a": 1})
+
+
+class TestFilenameHelpers(unittest.TestCase):
+    def test_normalize_doc_type(self):
+        self.assertEqual(s._normalize_doc_type("invoice"), "Invoice")
+        self.assertEqual(s._normalize_doc_type("tax"), "Tax Document")
+
+    def test_create_filename(self):
+        info={
+            "date":"2024-01-02",
+            "provider":"Acme/Inc",
+            "document_type":"invoice",
+            "title":"Test Doc",
+        }
+        name=s.create_filename(info)
+        self.assertTrue(name.endswith(".pdf"))
+        self.assertIn("2024-01-02", name)
+        self.assertIn("Acme-Inc", name)
+        self.assertIn("Invoice", name)
+
+
+if __name__ == "__main__":
+    unittest.main()

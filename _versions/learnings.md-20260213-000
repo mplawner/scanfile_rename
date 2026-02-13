@@ -1,0 +1,4 @@
+# Learnings
+
+- 2026-02-12: Added `pypdf` dependency so the tool can write classic PDF DocumentInfo metadata (Info dictionary) rather than XMP.
+- 2026-02-13: Added CLI parse-time validation helper `_positive_int()` and new `--keywords-count` flag (default 5) with subprocess-based unit tests using `--version` to avoid invoking Poppler/LM Studio.

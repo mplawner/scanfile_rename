@@ -1,0 +1,578 @@
+import sys, subprocess, os, json, re, base64, tempfile, shutil, argparse, time, typing
+from datetime import datetime
+
+__version__="0.1.0"
+
+LM_STUDIO_ENDPOINT=os.getenv("LM_STUDIO_ENDPOINT","http://localhost:1234/v1/chat/completions")
+MODEL_NAME=os.getenv("LM_STUDIO_MODEL","qwen3-vl-8b-instruct")
+LM_STUDIO_TIMEOUT=int(os.getenv("LM_STUDIO_TIMEOUT","120"))
+LM_STUDIO_MAX_RETRIES=int(os.getenv("LM_STUDIO_MAX_RETRIES","0"))
+PDFTOTEXT=os.getenv("PDFTOTEXT","/opt/homebrew/bin/pdftotext")
+PDFTOPPM=os.getenv("PDFTOPPM","/opt/homebrew/bin/pdftoppm")
+QPDF=os.getenv("QPDF","/opt/homebrew/bin/qpdf")
+GS=os.getenv("GS","/opt/homebrew/bin/gs")
+
+VISION_MAX_PAGES=int(os.getenv("VISION_MAX_PAGES","3"))
+VISION_DPI=int(os.getenv("VISION_DPI","200"))
+MIN_TEXT_CHARS=int(os.getenv("MIN_TEXT_CHARS","200"))
+
+_PROGRESS_ENABLED=True
+_PROGRESS_FORCE=os.getenv("FORCE_PROGRESS","0").strip().lower() in ("1","true","yes","y","on")
+
+def _fmt_secs(s):
+    try:
+        s=float(s)
+    except Exception:
+        return "?s"
+    if s < 1: return f"{int(s*1000)}ms"
+    if s < 60: return f"{s:.1f}s"
+    m=int(s//60); r=s-(m*60)
+    if m < 60: return f"{m}m{int(r):02d}s"
+    h=int(m//60); mm=m-(h*60)
+    return f"{h}h{mm:02d}m"
+
+def _progress(msg):
+    if not _PROGRESS_ENABLED: return
+    sys.stdout.write(str(msg).rstrip()+"\n")
+    sys.stdout.flush()
+
+def _run(cmd): return subprocess.run(cmd, capture_output=True, text=True)
+
+def _tool_err(r):
+    return (r.stderr or r.stdout or "").strip()
+
+def _tool_exists(path_or_name):
+    if not path_or_name: return None
+    if os.path.isabs(path_or_name) and os.path.exists(path_or_name):
+        return path_or_name
+    return shutil.which(path_or_name)
+
+def _looks_like_pdf_syntax_error(msg):
+    s=str(msg or "").lower()
+    return (
+        "couldn't find trailer dictionary" in s or
+        "couldn't read xref table" in s or
+        "pdfsyntaxerror" in s or
+        ("syntax error" in s and "xref" in s) or
+        ("syntax error" in s and "trailer" in s)
+    )
+
+def _repair_pdf_to(pdf_input, pdf_output):
+    qpdf=_tool_exists(QPDF) or _tool_exists("qpdf")
+    if qpdf:
+        _progress(f"  trying qpdf repair: {qpdf}")
+        r=_run([qpdf, "--repair", pdf_input, pdf_output])
+        if r.returncode == 0 and os.path.exists(pdf_output):
+            return True, None
+        err=_tool_err(r)
+        _progress(f"  qpdf repair failed (rc={r.returncode}): {err[:200]}")
+
+    gs=_tool_exists(GS) or _tool_exists("gs")
+    if gs:
+        _progress(f"  trying ghostscript rewrite: {gs}")
+        r=_run([gs, "-o", pdf_output, "-sDEVICE=pdfwrite", "-dNOPAUSE", "-dBATCH", "-dSAFER", pdf_input])
+        if r.returncode == 0 and os.path.exists(pdf_output):
+            return True, None
+        err=_tool_err(r)
+        _progress(f"  ghostscript rewrite failed (rc={r.returncode}): {err[:200]}")
+
+    return False, "No repair tool succeeded (qpdf/gs not available or failed)"
+
+def _extract_json_loose(s):
+    s=(s or "").strip()
+    try: return json.loads(s)
+    except: pass
+    i=s.find("{"); j=s.rfind("}")
+    if i!=-1 and j!=-1 and j>i:
+        try: return json.loads(s[i:j+1])
+        except: return None
+    return None
+
+def _img_to_data_url(path):
+    b=base64.b64encode(open(path,"rb").read()).decode("utf-8")
+    return f"data:image/jpeg;base64,{b}"
+
+def _pdftotext(pdf_input):
+    t0=time.monotonic()
+    _progress(f"[1/4] Extracting text via pdftotext: {os.path.basename(pdf_input)}")
+    r=_run([PDFTOTEXT, pdf_input, "-"])
+    if r.returncode != 0:
+        err=_tool_err(r)
+        _progress(f"  pdftotext failed (rc={r.returncode}) in {_fmt_secs(time.monotonic()-t0)}")
+        if err: _progress(f"  pdftotext error: {err[:200]}")
+        return "", r.returncode, err
+    out=(r.stdout or "").strip()
+    _progress(f"  pdftotext ok: {len(out)} chars in {_fmt_secs(time.monotonic()-t0)}")
+    return out, 0, ""
+
+def _render_pdf_to_images(pdf_input, max_pages=VISION_MAX_PAGES, dpi=VISION_DPI):
+    t0=time.monotonic()
+    _progress(f"[2/4] Rendering PDF to images (pages={max_pages}, dpi={dpi})")
+    with tempfile.TemporaryDirectory(prefix="scan_vlm_") as td:
+        prefix=os.path.join(td, "page")
+        r=_run([PDFTOPPM, "-f","1","-l",str(max_pages),"-r",str(dpi),"-jpeg", pdf_input, prefix])
+        if r.returncode != 0:
+            raise RuntimeError(_tool_err(r) or "pdftoppm failed")
+        imgs=sorted([os.path.join(td,f) for f in os.listdir(td) if f.startswith("page-") and f.endswith(".jpg")],
+                    key=lambda p: int(re.search(r"-(\d+)\.jpg$", p).group(1)))
+        if not imgs: raise RuntimeError("No images produced from PDF")
+        out=[_img_to_data_url(p) for p in imgs]
+        _progress(f"  rendered {len(out)} image(s) in {_fmt_secs(time.monotonic()-t0)}")
+        return out
+
+def _is_context_overflow(err):
+    s=str(err or "").lower()
+    return ("context length" in s) or ("overflows" in s) or ("not enough" in s) or ("overflow" in s)
+
+def _clean_err(resp):
+    try:
+        j=resp.json()
+        return j.get("error") or j
+    except Exception:
+        return (resp.text or "").strip()
+
+def _call_lm_studio(messages, max_tokens=350, timeout=LM_STUDIO_TIMEOUT, retries=LM_STUDIO_MAX_RETRIES):
+    import requests
+    payload={"model":MODEL_NAME,"messages":messages,"temperature":0.0,"max_tokens":max_tokens}
+    last_err=None
+    for attempt in range(retries+1):
+        try:
+            resp=requests.post(LM_STUDIO_ENDPOINT, headers={"Content-Type":"application/json"}, json=payload, timeout=timeout)
+        except requests.RequestException as e:
+            last_err=f"RequestException: {e}"
+            if attempt < retries: continue
+            return None, last_err
+        if resp.status_code >= 500:
+            last_err=str(_clean_err(resp))
+            if attempt < retries: continue
+            return None, last_err
+        if resp.status_code >= 400:
+            return None, _clean_err(resp)
+        try:
+            j=resp.json()
+            return j["choices"][0]["message"]["content"], None
+        except Exception as e:
+            last_err=f"BadResponse: {e} | body={(resp.text or '')[:2000]}"
+            if attempt < retries: continue
+            return None, last_err
+    return None, last_err or "UnknownError"
+
+def _prompt_from_text(t):
+    return f"""You rename scanned documents by extracting filename metadata.
+
+Text from a scanned document:
+{t}
+
+Return ONLY valid JSON (no markdown, no extra text) with:
+- date: best single date for the filename in YYYY-MM-DD (prefer date of service if this doc is about a service/appointment/delivery; otherwise prefer the document/issue date). null if unknown.
+- date_basis: "service" | "document" | "unknown"
+- provider: short issuer/vendor/provider/organization name (e.g., bank, utility, clinic, school). null if unknown.
+- document_type: short type like "Statement", "Invoice", "Receipt", "Bill", "Report", "Letter", "Notice", "Contract", "Policy", "Form", "Tax Document", or similar. null if unknown.
+- title: short human-readable title (max ~8 words). If the document already has a clear title, use it; otherwise infer one from content. null if unknown.
+- confidence: number 0 to 1
+"""
+
+def _prompt_for_vision(partial=None):
+    partial=json.dumps(partial or {}, ensure_ascii=False)
+    return f"""You rename scanned documents by extracting filename metadata.
+
+If the user provides partial extracted JSON, use it as hints, but correct any obvious mistakes.
+
+Partial extracted JSON hints (may be incomplete/wrong):
+{partial}
+
+Return ONLY valid JSON (no markdown, no extra text) with:
+- date: best single date for the filename in YYYY-MM-DD (prefer date of service if this doc is about a service/appointment/delivery; otherwise prefer the document/issue date). null if unknown.
+- date_basis: "service" | "document" | "unknown"
+- provider: short issuer/vendor/provider/organization name. null if unknown.
+- document_type: short type like "Statement", "Invoice", "Receipt", "Bill", "Report", "Letter", "Notice", "Contract", "Policy", "Form", "Tax Document", or similar. null if unknown.
+- title: short human-readable title (max ~8 words). If the document already has a clear title, use it; otherwise infer one from content. null if unknown.
+- confidence: number 0 to 1
+"""
+
+def _compact_text(text, max_chars):
+    t=(text or "").strip()
+    if len(t) <= max_chars: return t
+    lines=[ln.strip() for ln in t.splitlines() if ln.strip()]
+    if not lines: return t[:max_chars]
+    pats=[
+        r"\b\d{1,2}/\d{1,2}/\d{2,4}\b",
+        r"\b\d{4}-\d{2}-\d{2}\b",
+        r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\b",
+        r"\b(invoice|statement|receipt|bill|balance|amount|total|due|paid|payment|account|acct|order|purchase)\b",
+        r"\b(service|date of service|dos|appointment|visit|delivered|shipped)\b",
+        r"\b(policy|contract|agreement|notice|letter|form|report|summary|renewal)\b",
+        r"\b(tax|irs|1099|w-2|utility|electric|gas|water|internet|insurance|mortgage|bank|credit)\b",
+    ]
+    rx=re.compile("|".join(pats), re.I)
+    picked=[ln for ln in lines if rx.search(ln)]
+    s="\n".join(picked)
+    if len(s) >= max_chars: return s[:max_chars]
+    head="\n".join(lines[:250])
+    tail="\n".join(lines[-250:])
+    combo=(s+"\n\n"+head+"\n\n"+tail).strip()
+    return combo[:max_chars]
+
+def _normalize_date(s):
+    if not s: return None
+    s=str(s).strip()
+    try:
+        datetime.strptime(s, "%Y-%m-%d")
+        return s
+    except: return None
+
+def _normalize_doc_type(s):
+    if not s: return None
+    s=re.sub(r"\s{2,}"," ",str(s)).strip()
+    s=re.sub(r"[^A-Za-z0-9 &/+-]","",s).strip()
+    if not s: return None
+    low=s.lower()
+    m={
+        "invoice":"Invoice","inv":"Invoice",
+        "statement":"Statement",
+        "receipt":"Receipt",
+        "bill":"Bill",
+        "report":"Report",
+        "letter":"Letter",
+        "notice":"Notice",
+        "contract":"Contract","agreement":"Agreement",
+        "policy":"Policy",
+        "form":"Form",
+        "summary":"Summary",
+        "tax":"Tax Document",
+    }
+    for k,v in m.items():
+        if re.search(rf"\b{re.escape(k)}\b", low): return v
+    return " ".join(w.capitalize() for w in s.split())[:40]
+
+def _unknown_count(info):
+    info=info or {}
+    c=0
+    if not _normalize_date(info.get("date")): c+=1
+    if not (info.get("provider") and str(info.get("provider")).strip()): c+=1
+    if not _normalize_doc_type(info.get("document_type")): c+=1
+    t=str(info.get("title") or "").strip()
+    if len(t) < 3: c+=1
+    return c
+
+def _merge_fill_missing(base, extra):
+    base=dict(base or {})
+    extra=extra or {}
+    # date
+    if not _normalize_date(base.get("date")) and _normalize_date(extra.get("date")):
+        base["date"]=extra.get("date")
+    # simple string fields
+    for k in ["date_basis","provider","document_type","title"]:
+        if not (base.get(k) and str(base.get(k)).strip()) and (extra.get(k) and str(extra.get(k)).strip()):
+            base[k]=extra.get(k)
+    # confidence
+    try:
+        bc=float(base.get("confidence") or 0)
+    except: bc=0
+    try:
+        ec=float(extra.get("confidence") or 0)
+    except: ec=0
+    base["confidence"]=max(bc, ec)
+    return base
+
+def _safe_filename(s, max_len=80):
+    s=re.sub(r'[\r\n\t]+',' ',str(s or ""))
+    s=re.sub(r'[\/\\:\*\?"<>\|]+','-',s)
+    s=re.sub(r"\s{2,}"," ",s).strip()
+    s=s.strip(" .-_")
+    return (s[:max_len] or "")
+
+def _unique_path(path):
+    if not os.path.exists(path): return path
+    root, ext=os.path.splitext(path)
+    for i in range(2, 200):
+        p=f"{root} ({i}){ext}"
+        if not os.path.exists(p): return p
+    return f"{root} ({os.getpid()}){ext}"
+
+def _heuristic_extract(text):
+    lines=[ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+    top=lines[:60]
+    date=None
+    for ln in top:
+        m=re.search(r"\b(\d{4}-\d{2}-\d{2})\b", ln)
+        if m: date=m.group(1); break
+    if not date:
+        for ln in top:
+            m=re.search(r"\b(\d{1,2})/(\d{1,2})/(\d{2,4})\b", ln)
+            if not m: continue
+            mm,dd,yy=m.group(1),m.group(2),m.group(3)
+            yy=("20"+yy) if len(yy)==2 else yy
+            try:
+                d=datetime(int(yy),int(mm),int(dd))
+                date=d.strftime("%Y-%m-%d")
+                break
+            except: pass
+    provider=None
+    for ln in top[:15]:
+        if len(ln) >= 4 and not re.search(r"page\s+\d+", ln, re.I):
+            if re.search(r"[A-Za-z]", ln):
+                provider=ln
+                break
+    blob="\n".join(top).lower()
+    dt=None
+    for k,v in [("invoice","Invoice"),("statement","Statement"),("receipt","Receipt"),("bill","Bill"),("report","Report"),
+                ("contract","Contract"),("agreement","Agreement"),("policy","Policy"),("notice","Notice"),("letter","Letter"),("form","Form")]:
+        if k in blob: dt=v; break
+    title=None
+    for ln in top[:20]:
+        if re.search(r"\b(invoice|statement|receipt|bill|report|contract|agreement|policy|notice|letter|form)\b", ln, re.I):
+            title=ln
+            break
+    return {"date":date,"date_basis":"unknown","provider":provider,"document_type":dt,"title":title,"confidence":0.25}
+
+def extract_information(pdf_input: str, lm_timeout: int=LM_STUDIO_TIMEOUT, lm_retries: int=LM_STUDIO_MAX_RETRIES, allow_repair: bool=True) -> typing.Tuple[typing.Optional[typing.Dict[str, typing.Any]], str]:
+    repair_ctx=None
+    work_pdf=pdf_input
+
+    def _try_repair(reason):
+        nonlocal repair_ctx, work_pdf
+        if not allow_repair:
+            return False
+        if repair_ctx is not None:
+            return False
+        if not _looks_like_pdf_syntax_error(reason):
+            return False
+        _progress("[0/4] Attempting to repair PDF for Poppler")
+        repair_ctx=tempfile.TemporaryDirectory(prefix="scan_pdf_repair_")
+        repaired=os.path.join(repair_ctx.name, "repaired.pdf")
+        ok, err=_repair_pdf_to(pdf_input, repaired)
+        if ok:
+            work_pdf=repaired
+            _progress("  using repaired PDF for extraction")
+            return True
+        _progress(f"  repair not available/failed: {err}")
+        repair_ctx.cleanup()
+        repair_ctx=None
+        return False
+
+    try:
+        text, rc, err=_pdftotext(work_pdf)
+        if rc != 0 and work_pdf == pdf_input:
+            if _try_repair(err):
+                text, rc, err=_pdftotext(work_pdf)
+
+        def _vision_extract(partial_hint=None):
+            page_tries=[VISION_MAX_PAGES, max(1, VISION_MAX_PAGES-1), 1]
+            for idx, pages in enumerate(page_tries, start=1):
+                _progress(f"[3/4] Vision pass {idx}/{len(page_tries)}: pages={pages}")
+                try:
+                    imgs=_render_pdf_to_images(work_pdf, max_pages=pages, dpi=VISION_DPI)
+                except RuntimeError as e:
+                    if work_pdf == pdf_input and _try_repair(e):
+                        return _vision_extract(partial_hint=partial_hint)
+                    raise
+                prompt=_prompt_for_vision(partial_hint)
+                content=[{"type":"text","text":prompt}] + [{"type":"image_url","image_url":{"url":u}} for u in imgs]
+                t0=time.monotonic()
+                _progress(f"  calling LM Studio (vision) model={MODEL_NAME}")
+                out, err=_call_lm_studio([
+                    {"role":"system","content":"You extract metadata for naming scanned documents and output strict JSON only."},
+                    {"role":"user","content":content}
+                ], max_tokens=450, timeout=lm_timeout, retries=lm_retries)
+                if out:
+                    data=_extract_json_loose(out)
+                    if data: return data
+                    return None
+                _progress(f"  LM Studio (vision) no result in {_fmt_secs(time.monotonic()-t0)}")
+                if not _is_context_overflow(err):
+                    _progress(f"  vision stopped: {str(err)[:200]}")
+                    return None
+            return None
+
+        # --- Text-first path
+        if len(text) >= MIN_TEXT_CHARS:
+            budgets=[7000, 4500, 2800, 1600]
+            for idx, b in enumerate(budgets, start=1):
+                _progress(f"[3/4] Text pass {idx}/{len(budgets)}: budget={b}")
+                t=_compact_text(text, b)
+                t0=time.monotonic()
+                _progress(f"  calling LM Studio (text) model={MODEL_NAME}")
+                out, err=_call_lm_studio([
+                    {"role":"system","content":"You extract metadata for naming scanned documents and output strict JSON only."},
+                    {"role":"user","content":_prompt_from_text(t)}
+                ], max_tokens=350, timeout=lm_timeout, retries=lm_retries)
+
+                if out:
+                    data=_extract_json_loose(out)
+                    if not data: return None, text
+
+                    _progress(f"  text parse ok in {_fmt_secs(time.monotonic()-t0)}")
+
+                    # NEW: if too many unknowns, force vision and merge
+                    if _unknown_count(data) >= 2:
+                        _progress("  too many unknowns; trying vision merge")
+                        v=_vision_extract(partial_hint=data)
+                        if v: data=_merge_fill_missing(data, v)
+
+                    return data, text
+
+                if not _is_context_overflow(err):
+                    _progress(f"  text stopped: {str(err)[:200]}")
+                    return None, text
+                _progress("  context overflow; reducing budget")
+
+        # --- Vision fallback (no/low text or persistent overflow)
+        _progress("[3/4] Falling back to vision")
+        v=_vision_extract(partial_hint=None)
+        if v: return v, text
+        return None, text
+    finally:
+        if repair_ctx is not None:
+            repair_ctx.cleanup()
+
+# def extract_information(pdf_input):
+#     text=_pdftotext(pdf_input)
+
+#     def _prompt_from_text(t):
+#         return f"""You rename scanned documents by extracting filename metadata.
+
+# Text from a scanned document:
+# {t}
+
+# Return ONLY valid JSON (no markdown, no extra text) with:
+# - date: best single date for the filename in YYYY-MM-DD (prefer date of service if this doc is about a service/appointment/delivery; otherwise prefer the document/issue date). null if unknown.
+# - date_basis: "service" | "document" | "unknown"
+# - provider: short issuer/vendor/provider/organization name (e.g., bank, utility, clinic, school). null if unknown.
+# - document_type: short type like "Statement", "Invoice", "Receipt", "Bill", "Report", "Letter", "Notice", "Contract", "Policy", "Form", "Tax Document", or similar. null if unknown.
+# - title: short human-readable title (max ~8 words). If the document already has a clear title, use it; otherwise infer one from content. null if you truly can't.
+# - confidence: number 0 to 1
+# """
+
+#     if len(text) >= MIN_TEXT_CHARS:
+#         budgets=[7000, 4500, 2800, 1600]
+#         for b in budgets:
+#             t=_compact_text(text, b)
+#             out, err=_call_lm_studio([
+#                 {"role":"system","content":"You extract metadata for naming scanned documents and output strict JSON only."},
+#                 {"role":"user","content":_prompt_from_text(t)}
+#             ], max_tokens=350, timeout=60)
+#             if out:
+#                 data=_extract_json_loose(out)
+#                 if data: return data, text
+#                 return None, text
+#             if not _is_context_overflow(err): return None, text
+#     try:
+#         for pages in [VISION_MAX_PAGES, max(1, VISION_MAX_PAGES-1), 1]:
+#             imgs=_render_pdf_to_images(pdf_input, max_pages=pages, dpi=VISION_DPI)
+#             prompt=f"""You rename scanned documents by extracting filename metadata.
+
+# Return ONLY valid JSON (no markdown, no extra text) with:
+# - date: best single date for the filename in YYYY-MM-DD (prefer date of service if this doc is about a service/appointment/delivery; otherwise prefer the document/issue date). null if unknown.
+# - date_basis: "service" | "document" | "unknown"
+# - provider: short issuer/vendor/provider/organization name. null if unknown.
+# - document_type: short type like "Statement", "Invoice", "Receipt", "Bill", "Report", "Letter", "Notice", "Contract", "Policy", "Form", "Tax Document", or similar. null if unknown.
+# - title: short human-readable title (max ~8 words). If the document already has a clear title, use it; otherwise infer one from content. null if you truly can't.
+# - confidence: number 0 to 1
+# """
+#             content=[{"type":"text","text":prompt}] + [{"type":"image_url","image_url":{"url":u}} for u in imgs]
+#             out, err=_call_lm_studio([
+#                 {"role":"system","content":"You extract metadata for naming scanned documents and output strict JSON only."},
+#                 {"role":"user","content":content}
+#             ], max_tokens=450, timeout=120)
+#             if out:
+#                 data=_extract_json_loose(out)
+#                 if data: return data, text
+#                 return None, text
+#             if not _is_context_overflow(err): return None, text
+#     except Exception:
+#         return None, text
+#     return None, text
+
+def create_filename(info: typing.Dict[str, typing.Any]) -> str:
+    d=_normalize_date(info.get("date"))
+    if not d: d="UnknownDate"
+    provider=_safe_filename(info.get("provider") or "Unknown Provider", 60)
+    dt=_normalize_doc_type(info.get("document_type")) or "Document"
+    title=_safe_filename(info.get("title") or "Untitled", 80)
+
+    parts=[d, provider, dt, title]
+    parts=[p for p in parts if p and p.strip()]
+    base=" - ".join(parts).strip()
+    base=_safe_filename(base, 180)
+    return f"{base}.pdf"
+
+def _positive_int(s):
+    try:
+        v=int(s)
+    except Exception:
+        raise argparse.ArgumentTypeError("must be an integer")
+    if v <= 0:
+        raise argparse.ArgumentTypeError("must be > 0")
+    return v
+
+def main() -> int:
+    ap=argparse.ArgumentParser()
+    ap.add_argument("pdf", help="Path to input PDF")
+    ap.add_argument("--outdir", default=None, help="Destination directory (default: <input_dir>/processed)")
+    ap.add_argument("--move", action="store_true", help="Move instead of copy")
+    ap.add_argument("--dry-run", action="store_true", help="Print result, do not write file")
+    ap.add_argument("--print-json", action="store_true", help="Print extracted JSON")
+    ap.add_argument("--no-progress", action="store_true", help="Disable progress output")
+    ap.add_argument("--no-repair", action="store_true", help="Disable qpdf/ghostscript repair attempts")
+    ap.add_argument("--keywords-count", type=_positive_int, default=5, help="Number of keywords to include (default: 5)")
+    ap.add_argument("--lm-timeout", type=int, default=LM_STUDIO_TIMEOUT, help="LM Studio timeout in seconds")
+    ap.add_argument("--lm-retries", type=int, default=LM_STUDIO_MAX_RETRIES, help="LM Studio max retries on network/server errors")
+    ap.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    args=ap.parse_args()
+
+    global _PROGRESS_ENABLED
+    _PROGRESS_ENABLED = (not args.no_progress)
+    if args.print_json and (not sys.stdout.isatty()) and (not _PROGRESS_FORCE):
+        # Keep stdout machine-readable when piping JSON.
+        _PROGRESS_ENABLED=False
+
+    pdf_input=args.pdf
+    if not os.path.isfile(pdf_input):
+        print("File not found:", pdf_input)
+        return 2
+
+    _progress(f"Processing: {os.path.basename(pdf_input)}")
+
+    original_dir=os.path.dirname(os.path.abspath(pdf_input))
+    outdir=args.outdir or os.path.join(original_dir, "processed")
+    os.makedirs(outdir, exist_ok=True)
+    _progress(f"Output dir: {outdir}")
+
+    try:
+        lm_timeout=max(1, int(args.lm_timeout))
+        lm_retries=max(0, int(args.lm_retries))
+        info, raw_text=extract_information(pdf_input, lm_timeout=lm_timeout, lm_retries=lm_retries, allow_repair=(not args.no_repair))
+    except RuntimeError as e:
+        print("Failed to process PDF:", str(e))
+        print("Hint: the PDF may be corrupt; installing qpdf/ghostscript can sometimes repair it.")
+        return 1
+    if not info and raw_text:
+        _progress("[4/4] Falling back to heuristic extraction")
+        info=_heuristic_extract(raw_text)
+
+    if not info:
+        print("Failed to extract information.")
+        return 1
+
+    if args.print_json:
+        print(json.dumps(info, indent=2, ensure_ascii=False))
+
+    new_name=create_filename(info)
+    dst=_unique_path(os.path.join(outdir, new_name))
+
+    print("Proposed:", os.path.basename(dst))
+    if args.dry_run: return 0
+
+    if args.move:
+        _progress("[4/4] Moving file")
+        shutil.move(pdf_input, dst)
+        print("Moved to:", dst)
+    else:
+        _progress("[4/4] Copying file")
+        shutil.copy2(pdf_input, dst)
+        print("Copied to:", dst)
+    return 0
+
+if __name__=="__main__":
+    raise SystemExit(main())
