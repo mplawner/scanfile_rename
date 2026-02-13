@@ -5,7 +5,7 @@ This repo is a small Python CLI for renaming scanned PDFs.
 ## Project Overview
 
 - Primary script: `scanfile_rename.py`
-- Older variants live under `_versions/` (avoid editing unless asked).
+- `_versions/` is for local-only snapshots (gitignored, uncommitted). Keep it as a scratchpad, not in-repo history.
 
 Pipeline (high level):
 1) Extract text via Poppler `pdftotext`
@@ -84,7 +84,8 @@ python3 scanfile_rename.py --version
 ## Agent Workflow Expectations
 
 - Prefer minimal, targeted diffs.
-- Whenever you change a file, also save a copy to `_versions/` named `{filename}-YYYYMMDD-###` with the numeric suffix incremented for that day.
+- Whenever you change a file, also save a local snapshot under `_versions/` named `{filename}-YYYYMMDD-###` with the numeric suffix incremented for that day.
+- `_versions/` is gitignored and should remain uncommitted; it is for local backups only.
 - Keep stdout stable; if adding output, consider `--no-progress` / `--print-json` interactions.
 - Avoid adding new dependencies unless necessary.
 - Standard library only unless explicitly required.
@@ -149,7 +150,7 @@ These conventions are inferred from `scanfile_rename.py` and should be followed.
 ## Repo Structure Notes
 
 - `scanfile_rename.py` is the only active script.
-- `_versions/` contains snapshots; treat as historical reference.
+- `_versions/` contains local snapshots only; treat it as a scratch directory (gitignored).
 
 ## Cursor / Copilot Rules
 
