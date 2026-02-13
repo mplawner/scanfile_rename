@@ -12,6 +12,7 @@ and this project adheres to Semantic Versioning (https://semver.org/spec/v2.0.0.
 - GitHub Actions CI workflow.
 - CONTRIBUTING.md.
 - README badges (license + CI).
+- `--metadata-only` flag for in-place PDF metadata updates.
 
 ## [0.1.0] - 2026-02-13
 ### Added

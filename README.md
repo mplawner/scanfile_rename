@@ -48,6 +48,12 @@ More examples:
 # Dry run (no file written)
 python3 scanfile_rename.py "scan.pdf" --dry-run
 
+# In-place metadata update only (no rename/copy/move)
+python3 scanfile_rename.py "scan.pdf" --metadata-only
+
+# Preview metadata-only output (no write)
+python3 scanfile_rename.py "scan.pdf" --metadata-only --dry-run
+
 # Copy into a specific directory
 python3 scanfile_rename.py "scan.pdf" --outdir "./renamed"
 
@@ -69,6 +75,7 @@ All flags below match `scanfile_rename.py`'s `argparse` setup:
 - `--outdir DIR`: destination directory (default: `<input_dir>/processed`)
 - `--move`: move instead of copy
 - `--dry-run`: print the proposed filename, do not write a file
+- `--metadata-only`: update PDF metadata in place and exit (non-zero if metadata is not written)
 - `--print-json`: print extracted JSON (useful for debugging)
 - `--no-progress`: disable progress output
 - `--no-repair`: disable qpdf/ghostscript repair attempts
