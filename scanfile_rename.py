@@ -739,6 +739,7 @@ def main() -> int:
     ap.add_argument("pdf", help="Path to input PDF")
     ap.add_argument("--outdir", default=None, help="Destination directory (default: <input_dir>/processed)")
     ap.add_argument("--move", action="store_true", help="Move instead of copy")
+    ap.add_argument("--metadata-only", action="store_true", help="Write PDF DocumentInfo metadata in-place (no copy/move)")
     ap.add_argument("--dry-run", action="store_true", help="Print result, do not write file")
     ap.add_argument("--print-json", action="store_true", help="Print extracted JSON")
     ap.add_argument("--no-progress", action="store_true", help="Disable progress output")
@@ -759,6 +760,63 @@ def main() -> int:
     if not os.path.isfile(pdf_input):
         print("File not found:", pdf_input)
         return 2
+
+    if args.metadata_only:
+        if args.outdir is not None:
+            print("Error: --metadata-only is incompatible with --outdir")
+            return 2
+        if args.move:
+            print("Error: --metadata-only is incompatible with --move")
+            return 2
+
+        if args.dry_run and (not _PROGRESS_FORCE):
+            _PROGRESS_ENABLED=False
+
+        try:
+            lm_timeout=max(1, int(args.lm_timeout))
+            lm_retries=max(0, int(args.lm_retries))
+            info, raw_text=extract_information(pdf_input, lm_timeout=lm_timeout, lm_retries=lm_retries, allow_repair=(not args.no_repair), keywords_count=args.keywords_count)
+        except RuntimeError as e:
+            print("Failed to process PDF:", str(e))
+            print("Hint: the PDF may be corrupt; installing qpdf/ghostscript can sometimes repair it.")
+            return 1
+        if (not info) and raw_text:
+            _progress("[4/4] Falling back to heuristic extraction")
+            info=_heuristic_extract(raw_text)
+
+        if not info:
+            print("Failed to extract information.")
+            return 1
+
+        if args.print_json and (not args.dry_run):
+            print(json.dumps(info, indent=2, ensure_ascii=False))
+
+        title=pretty_title_from_filename(os.path.basename(pdf_input))
+        docinfo={
+            "/Title": title,
+            "/Author": info.get("author") or info.get("provider"),
+            "/Subject": info.get("subject"),
+            "/Keywords": format_keywords(info.get("keywords", []), args.keywords_count),
+        }
+        creation_date=pdf_creation_date_from_ymd(info.get("date"))
+        if creation_date:
+            docinfo["/CreationDate"]=creation_date
+            docinfo["/ModDate"]=creation_date
+
+        if args.dry_run:
+            print(json.dumps(docinfo, indent=2, ensure_ascii=False))
+            return 0
+
+        progress_prev=_PROGRESS_ENABLED
+        try:
+            _PROGRESS_ENABLED=False
+            ok, reason=write_pdf_metadata_in_place(pdf_input, docinfo)
+        finally:
+            _PROGRESS_ENABLED=progress_prev
+        if not ok:
+            print(reason or "write_failed")
+            return 1
+        return 0
 
     _progress(f"Processing: {os.path.basename(pdf_input)}")
 
